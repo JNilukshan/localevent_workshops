@@ -1,0 +1,104 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build project
+      run: npm run build
+
+    - name: Verify build output
+      run: |
+        if [ ! -d "dist" ]; then
+          echo "Build failed: dist directory not found"
+          exit 1
+        fi
+        echo "Build successful, dist contents:"
+        ls -la dist/
+
+    - name: Deploy on VM
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USERNAME }}
+        password: ${{ secrets.VM_PASSWORD }}
+        script: |
+          # Create application directory
+          mkdir -p /home/azureuser/localevent_workshops
+          
+          # Install serve globally if not exists
+          if ! command -v serve &> /dev/null; then
+            sudo npm install -g serve
+          fi
+          
+          # Install PM2 globally if not exists
+          if ! command -v pm2 &> /dev/null; then
+            sudo npm install -g pm2
+          fi
+          
+          # Stop any existing process
+          pm2 stop localevent_workshops 2>/dev/null || true
+          pm2 delete localevent_workshops 2>/dev/null || true
+          
+          # Remove old files
+          rm -rf /home/azureuser/localevent_workshops/*
+
+    - name: Copy build files to VM
+      uses: appleboy/scp-action@v0.1.5
+      with:
+        host: ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USERNAME }}
+        password: ${{ secrets.VM_PASSWORD }}
+        source: "dist/*"
+        target: "/home/azureuser/localevent_workshops/"
+        strip_components: 1
+
+    - name: Start application
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USERNAME }}
+        password: ${{ secrets.VM_PASSWORD }}
+        script: |
+          # Verify files copied correctly
+          echo "Checking deployed files:"
+          ls -la /home/azureuser/localevent_workshops/
+          
+          # Verify index.html exists
+          if [ ! -f "/home/azureuser/localevent_workshops/index.html" ]; then
+            echo "Error: index.html not found after deployment"
+            exit 1
+          fi
+          
+          # Start the application
+          cd /home/azureuser/localevent_workshops
+          pm2 start serve --name localevent_workshops -- -s . -l 3001 --single
+          pm2 save
+          
+          # Verify app is running
+          sleep 5
+          if pm2 list | grep -q "localevent_workshops.*online"; then
+            echo "✅ App deployed and started successfully!"
+            echo "🌐 Visit: http://$(curl -s ifconfig.me):3001"
+          else
+            echo "❌ App failed to start"
+            pm2 logs localevent_workshops --lines 10
+            exit 1
+          fi
